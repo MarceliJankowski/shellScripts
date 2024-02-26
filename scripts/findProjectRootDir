@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+
+set -o nounset
+set -o pipefail
+
+source "$(dirname $0)/../lib.sh"
+
+# to get info on this script run it with '-h' flag
+
+##################################################
+#                GLOBAL VARIABLES                #
+##################################################
+
+readonly SPLIT_PATH_SCRIPT="$(dirname $0)/splitPath"
+
+readonly ROOT_DIR_NOT_FOUND_EXIT_CODE=4
+readonly ROOT_DIR_NOT_FOUND_MSG="project root directory was not found"
+
+# options (can be set through CLI)
+INPUT_PATH="$PWD"
+LENIENT_MODE=$FALSE
+QUIET_MODE=$FALSE
+INDICATORS=('.git')
+
+readonly MANUAL="
+NAME
+      $SCRIPT_NAME - find project root directory
+
+SYNOPSIS
+      $SCRIPT_NAME [-h] [-l] [-q] [-p path] [indicator]...
+
+DESCRIPTION
+      Find root directory of a project, begin search at path (defaults to 'PWD') and go up to '/'.
+      Root directory is recognized by containing at least one indicator from indicator list.
+
+      Indicators are file names searched for at each path segment.
+      Existence of such indicator marks path segment as project root directory.
+      Upon finding project root directory, corresponding path segment is echoed out.
+      If all path segments were traversed and no indicator matched, root directory remains unfound.
+      In such case error is thrown (this behavior can be altered with '-l' and '-q' flags).
+
+      Indicators default to: $(printf "'%s', " "${INDICATORS[@]}" | sed 's/, $//').
+
+      Depends on '${SPLIT_PATH_SCRIPT}' script.
+
+OPTIONS
+      -h
+          Get help, print out the manual and exit.
+
+      -l
+          Turn on LENIENT_MODE.
+          Exit successfully when project root directory isn't found.
+          Log message '${ROOT_DIR_NOT_FOUND_MSG}' to stdout (instead of stderr).
+
+      -q
+          Turn on QUIET_MODE.
+          Don't log anything when project root directory isn't found.
+
+      -p path
+          Set traversal path.
+          Provided path can be either relative or absolute (both must be enterable via 'cd' command).
+
+EXIT CODES
+      Exit code indicates whether $SCRIPT_NAME successfully executed, or failed for some reason.
+      Different exit codes indicate different failure causes:
+
+      0  $SCRIPT_NAME successfully run, without raising any exceptions.
+
+      $INVALID_FLAG_ERROR_CODE  Invalid flag supplied.
+
+      $INVALID_ARG_ERROR_CODE  Invalid argument supplied.
+
+      $MISSING_ARG_ERROR_CODE  Missing mandatory argument.
+
+      $ROOT_DIR_NOT_FOUND_EXIT_CODE  Root directory was not found.
+
+      $INTERNAL_ERROR_CODE  Developer fuc**d up, blame him!
+"
+
+##################################################
+#                   FUNCTIONS                    #
+##################################################
+
+# @desc traverse `path_segments` in search of root directory denoted by INDICATORS
+# upon finding root directory, corresponding path segment gets echoed out
+# @return 0 if root directory was found, 1 otherwise
+findRootDirInPathSegments() {
+	[[ $# -ne 1 ]] && throwInternalErr "findRootDirInPathSegments() expects 'path_segments' argument"
+
+	local -r path_segments="$1"
+	local path_segment
+	local indicator
+
+	while read -r path_segment; do
+		for indicator in "${INDICATORS[@]}"; do
+			if [[ -e "${path_segment}/${indicator}" ]]; then
+				# indicator exists, root directory was found
+				echo "$path_segment"
+				return 0 # found
+			fi
+		done
+	done <<<"$path_segments"
+
+	return 1 # not found
+}
+
+##################################################
+#             EXECUTION ENTRY POINT              #
+##################################################
+
+# handle flags
+while getopts ':hlqp:' FLAG; do
+	case "$FLAG" in
+	h) printManual && exit 0 ;;
+	l) LENIENT_MODE=$TRUE ;;
+	q) QUIET_MODE=$TRUE ;;
+	p) INPUT_PATH="$OPTARG" ;;
+	:) throwErr "flag '-${OPTARG}' requires argument" $MISSING_ARG_ERROR_CODE ;;
+	?) throwErr "invalid flag '-${OPTARG}' supplied" $INVALID_FLAG_ERROR_CODE ;;
+	esac
+done
+
+# turn options into constants
+readonly LENIENT_MODE
+readonly QUIET_MODE
+readonly INPUT_PATH
+
+# remove flags, leaving script arguments
+shift $((OPTIND - 1))
+
+# check if indicators were supplied
+[[ $# -gt 0 ]] && INDICATORS=("$@")
+readonly INDICATORS
+
+PATH_SEGMENTS=$($SPLIT_PATH_SCRIPT "$INPUT_PATH")
+[[ $? -ne 0 ]] && exit $INVALID_ARG_ERROR_CODE
+readonly PATH_SEGMENTS
+
+findRootDirInPathSegments "$PATH_SEGMENTS"
+[[ $? -eq 0 ]] && exit 0
+
+# if execution reached this point, root directory wasn't found
+if [[ $QUIET_MODE -eq $TRUE ]]; then
+	[[ $LENIENT_MODE -eq $TRUE ]] && exit 0
+	exit $ROOT_DIR_NOT_FOUND_EXIT_CODE
+fi
+
+if [[ $LENIENT_MODE -eq $TRUE ]]; then
+	echo "$ROOT_DIR_NOT_FOUND_MSG" && exit 0
+else
+	throwErr "$ROOT_DIR_NOT_FOUND_MSG" $ROOT_DIR_NOT_FOUND_EXIT_CODE
+fi
