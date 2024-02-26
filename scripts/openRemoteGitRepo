@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+
+set -o nounset
+set -o pipefail
+
+source "$(dirname $0)/../lib.sh"
+
+# to get info on this script run it with '-h' flag
+
+##################################################
+#                GLOBAL VARIABLES                #
+##################################################
+
+readonly GIT_CMD_NOT_AVAILABLE_ERROR_CODE=4
+readonly GIT_VERSION_BELOW_MIN_ERROR_CODE=5
+readonly GIT_REMOTE_URL_NOT_FOUND_ERROR_CODE=6
+readonly BROWSER_UNAVAILABLE_ERROR_CODE=7
+
+readonly GIT_MIN_VERSION='2.7.0' # this version introduced 'git remote get-url' command
+
+# options (can be set through CLI)
+REMOTE_NAME='origin'
+INPUT_PATHS=("$PWD")
+
+readonly MANUAL="
+NAME
+      $SCRIPT_NAME - open remote git repositories reachable from provided paths
+
+SYNOPSIS
+      $SCRIPT_NAME [-h] [-b browser] [-r name] [path]...
+
+DESCRIPTION
+      Open remote git repositories reachable from provided paths in the specified browser.
+
+      Provided paths can be either relative or absolute, they default to current working directory ('PWD').
+      Every path needs to be "under" git repository / git repository has to be reachable from every path.
+
+      Git remote name is used for retrieving repository URLS (defaults to '${REMOTE_NAME}'), can be set with '-r' flag.
+      $SCRIPT_NAME lacks a way to specify separate remote names for individual paths.
+
+      Every retrieved URL is passed to browser as separate argument.
+      Browser can be specified interactively, with '-b' flag, or through BROWSER shell variable.
+
+OPTIONS
+      -h
+          Get help, print out the manual and exit.
+
+      -b browser
+          Set browser command used for opening remote git repositories.
+          Browser receives all remote URLS as arguments and gets executed as background process.
+
+          BROWSER shell variable can also be used to specify browser non-interactively.
+
+      -r name
+          Set name of git remote connection from which URLS shall be retrieved.
+          This singular remote name is used for every repository (defaults to '${REMOTE_NAME}').
+
+EXIT CODES
+      Exit code indicates whether $SCRIPT_NAME successfully executed, or failed for some reason.
+      Different exit codes indicate different failure causes:
+
+      0  $SCRIPT_NAME successfully run, without raising any exceptions.
+
+      $INVALID_FLAG_ERROR_CODE  Invalid flag supplied.
+
+      $INVALID_ARG_ERROR_CODE  Invalid argument supplied.
+
+      $MISSING_ARG_ERROR_CODE  Missing mandatory argument.
+
+      $GIT_CMD_NOT_AVAILABLE_ERROR_CODE  'git' command is unavailable.
+
+      $GIT_VERSION_BELOW_MIN_ERROR_CODE  Git version is below '${GIT_MIN_VERSION}' (required minimum).
+
+      $GIT_REMOTE_URL_NOT_FOUND_ERROR_CODE  Retrieval of remote git url failed.
+
+      $BROWSER_UNAVAILABLE_ERROR_CODE  Browser command is unavailable.
+
+      $INTERNAL_ERROR_CODE  Developer fuc**d up, blame him!
+"
+
+##################################################
+#             EXECUTION ENTRY POINT              #
+##################################################
+
+# make sure that git is available and its version is sufficient
+isCmdAvailable 'git' || throwErr "git command is not available" $GIT_CMD_NOT_AVAILABLE_ERROR_CODE
+compareVersions "$(git --version | awk -F ' ' '{ print $NF }')" "$GIT_MIN_VERSION" ||
+	throwErr "git version is below '${GIT_MIN_VERSION}' (required minimum)" $GIT_VERSION_BELOW_MIN_ERROR_CODE
+
+# handle flags
+while getopts ':hb:r:' FLAG; do
+	case "$FLAG" in
+	h) printManual && exit 0 ;;
+	b) BROWSER="$OPTARG" ;;
+	r) REMOTE_NAME="$OPTARG" ;;
+	:) throwErr "flag '-${OPTARG}' requires argument" $MISSING_ARG_ERROR_CODE ;;
+	?) throwErr "invalid flag '-${OPTARG}' supplied" $INVALID_FLAG_ERROR_CODE ;;
+	esac
+done
+
+# make sure that BROWSER is specified and available
+if [[ -z "$BROWSER" ]]; then # unspecified
+	while true; do
+		read -p "Specify browser: " BROWSER
+		isCmdAvailable "$BROWSER" && break
+		logWarning "Specified command '${BROWSER}' is unavailable"
+	done
+else # specified
+	isCmdAvailable "$BROWSER" || throwErr "Browser command '${BROWSER}' is unavailable" $BROWSER_UNAVAILABLE_ERROR_CODE
+fi
+
+# turn options into constants
+readonly REMOTE_NAME
+readonly BROWSER
+
+# remove flags, leaving script arguments
+shift $((OPTIND - 1))
+
+# check if path arguments were supplied
+[[ $# -gt 0 ]] && INPUT_PATHS=("$@")
+
+# retrieve git remote URLS from INPUT_PATHS
+URLS=()
+for INPUT_PATH in "${INPUT_PATHS[@]}"; do
+	[[ ! -e "$INPUT_PATH" ]] &&
+		throwErr "path argument '${INPUT_PATH}' doesn't exist" $INVALID_ARG_ERROR_CODE
+
+	git -C "$INPUT_PATH" status &>/dev/null ||
+		throwErr "path '${INPUT_PATH}' is not under git control" $INVALID_ARG_ERROR_CODE
+
+	URLS+=("$(git -C "$INPUT_PATH" remote get-url "$REMOTE_NAME" 2>/dev/null)")
+	[[ $? -ne 0 ]] &&
+		throwErr "couldn't retrieve remote '${REMOTE_NAME}' url of git repository reachable from '${INPUT_PATH}'" \
+			$GIT_REMOTE_URL_NOT_FOUND_ERROR_CODE
+done
+
+# leave it all to the BROWSER
+$BROWSER "${URLS[@]}" &
+
+exit 0
